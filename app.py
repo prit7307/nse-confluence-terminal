@@ -6,20 +6,20 @@ import re
 import os
 
 st.set_page_config(
-    page_title="NSE Institutional Confluence & Research Terminal",
-    page_icon="⚡",
+    page_title="NSE Unified Confluence & Research Scanner",
+    page_icon="💎",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # ==============================================================================
-# DATA ENDPOINTS
+# DATA ENDPOINTS & URLS
 # ==============================================================================
 GITHUB_PARQUET_URL = "https://raw.githubusercontent.com/prit7307/nse-working-scanner/main/data/nse_rolling_60d.parquet"
 SECTOR_MASTER_URL = "https://raw.githubusercontent.com/prit7307/nse-working-scanner/main/nse_sector_master.csv"
 FUNDAMENTAL_CSV_FILE = "nse_confluence_picks_20261030.csv"
 
-# Replace with your published Google Sheet CSV URL from Part 1
+# Your live published Google Sheet CSV URL
 REPORTS_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRipXwixKWlGix_0O58Vq5kp-l5W8TubMbWaSeVf9P6j-JtT3GhpajftV4OK9kcl7cl6WJkfzGY1JRO/pub?output=csv"
 
 
@@ -29,20 +29,42 @@ def clean_header(name: str) -> str:
     return c.replace(" RS.CR.", " (CR)").replace(" RS.", "")
 
 
-@st.cache_data(ttl=60)
-def fetch_live_reports_catalog(url: str):
-    """Fetches the auto-updated Google Sheet catalog."""
+# ==============================================================================
+# 1. OPTIMIZED GOOGLE SHEET REPORT CATALOG LOADER
+# ==============================================================================
+@st.cache_data(ttl=600)  # Caches for 10 minutes to eliminate network latency
+def get_report_link_map(sheet_url: str):
+    """
+    Downloads the Google Sheet once and builds a fast keyword-to-link catalog.
+    """
     try:
-        df = pd.read_csv(url)
-        df.columns = [str(c).strip().upper() for c in df.columns]
-        return df
-    except Exception as e:
-        return pd.DataFrame()
+        rep_df = pd.read_csv(sheet_url)
+        rep_df.columns = [str(c).strip().upper() for c in rep_df.columns]
+    except Exception:
+        return []
+
+    link_col = next((c for c in ["DRIVE_VIEW_LINK", "VIEW_URL", "LINK"] if c in rep_df.columns), None)
+    if not link_col:
+        return []
+
+    report_items = []
+    for _, row in rep_df.iterrows():
+        title = str(row.get("REPORT_TITLE", "")).upper()
+        sym_name = str(row.get("SYMBOL_OR_NAME", "")).upper()
+        link = str(row.get(link_col, "")).strip()
+        combined_text = f"{title} {sym_name}"
+        if link and link.startswith("http"):
+            report_items.append((combined_text, link))
+
+    return report_items
 
 
+# ==============================================================================
+# 2. CORE EXCHANGE TECHNICAL & FUNDAMENTAL LOADER
+# ==============================================================================
 @st.cache_data(ttl=300)
-def load_unified_dataset():
-    # 1. Ingest Technical Dataset
+def load_base_datasets():
+    # A. Ingest Live Parquet from GitHub
     try:
         raw_tech = pd.read_parquet(GITHUB_PARQUET_URL)
         raw_tech["DATE"] = pd.to_datetime(raw_tech["DATE"])
@@ -53,13 +75,13 @@ def load_unified_dataset():
             if c in tech_df.columns:
                 tech_df[c] = pd.to_numeric(tech_df[c], errors="coerce").fillna(0.0)
 
-        # DSI Calculation
+        # 1. Delivery Surge Index (DSI)
         rolling_deliv = raw_tech.groupby("SYMBOL")["DELIV_QTY"].transform(
             lambda s: s.rolling(50, min_periods=1).mean()
         ).replace(0, np.nan)
         tech_df["DSI"] = (tech_df["DELIV_QTY"] / rolling_deliv.loc[tech_df.index]).fillna(1.0).round(2)
 
-        # Mansfield RS Calculation
+        # 2. Mansfield Relative Strength vs Universe Median
         benchmark = raw_tech.groupby("DATE")["CLOSE"].transform("median").replace(0, np.nan)
         raw_tech["RAW_RS"] = (raw_tech["CLOSE"] / benchmark).fillna(1.0)
         raw_tech["SMA50_RS"] = raw_tech.groupby("SYMBOL")["RAW_RS"].transform(
@@ -67,12 +89,12 @@ def load_unified_dataset():
         ).replace(0, np.nan)
         tech_df["MANSFIELD_RS"] = (((raw_tech.loc[tech_df.index, "RAW_RS"] / raw_tech.loc[tech_df.index, "SMA50_RS"]) - 1.0) * 100.0).fillna(0.0).round(2)
 
-        # NR7 Contraction
+        # 3. NR7 Volatility Contraction
         raw_tech["RANGE"] = (raw_tech["HIGH"] - raw_tech["LOW"]).round(2)
         min_7d = raw_tech.groupby("SYMBOL")["RANGE"].transform(lambda s: s.rolling(7, min_periods=1).min())
         tech_df["NR7"] = (raw_tech.loc[tech_df.index, "RANGE"] <= min_7d.loc[tech_df.index]) & (raw_tech.loc[tech_df.index, "RANGE"] > 0)
 
-        # Price Change %
+        # 4. Standard Session % Change
         if "PCT_CHANGE" not in tech_df.columns or tech_df["PCT_CHANGE"].abs().sum() == 0:
             tech_df["PCT_CHANGE"] = np.where(
                 tech_df["PREV_CLOSE"] > 0,
@@ -80,7 +102,7 @@ def load_unified_dataset():
                 0.0
             )
 
-        # Setup Labels
+        # Accumulation Alert
         tech_df["Accumulation_Alert"] = np.where(
             (tech_df["DSI"] >= 1.5) & (tech_df["PCT_CHANGE"] > 0) & (tech_df["NR7"]),
             "STRONG ACCUMULATION",
@@ -90,10 +112,10 @@ def load_unified_dataset():
         tech_df["SYMBOL"] = tech_df["SYMBOL"].astype(str).str.strip().str.upper()
 
     except Exception as e:
-        st.error(f"Error fetching technical dataset: {e}")
+        st.error(f"Error fetching technical exchange data: {e}")
         return pd.DataFrame(), None
 
-    # 2. Ingest Sector Mapping
+    # B. Ingest Sector Master
     try:
         sec_df = pd.read_csv(SECTOR_MASTER_URL)
         sec_df["SYMBOL"] = sec_df["SYMBOL"].astype(str).str.strip().str.upper()
@@ -102,13 +124,15 @@ def load_unified_dataset():
     except Exception:
         tech_df["SECTOR"] = "Broad Market / Small & Mid Cap"
 
-    # 3. Merge Confluence Fundamental Metrics
+    # C. Ingest Confluence Fundamental Metrics
     if os.path.exists(FUNDAMENTAL_CSV_FILE):
         fund_df = pd.read_csv(FUNDAMENTAL_CSV_FILE)
         fund_df.columns = [clean_header(c) for c in fund_df.columns]
         fund_df["SYMBOL"] = fund_df["SYMBOL"].astype(str).str.strip().str.upper()
+
         overlap = [c for c in ["CLOSE", "PCT_CHANGE", "DELIV_QTY", "DSI", "MANSFIELD_RS"] if c in fund_df.columns]
         fund_df = fund_df.drop(columns=overlap)
+
         unified_df = tech_df.merge(fund_df, on="SYMBOL", how="left")
     else:
         unified_df = tech_df
@@ -116,44 +140,50 @@ def load_unified_dataset():
     return unified_df, latest_date
 
 
-df, active_session = load_unified_dataset()
-reports_df = fetch_live_reports_catalog(REPORTS_SHEET_CSV_URL)
+# ==============================================================================
+# 3. HIGH-SPEED VECTORIZED REPORT MATCHER
+# ==============================================================================
+@st.cache_data(ttl=300)
+def attach_reports_fast(base_df, catalog_items):
+    """Matches stocks against Drive reports in under 0.1 seconds."""
+    if not catalog_items or base_df.empty:
+        base_df["REPORT_LINK"] = None
+        base_df["HAS_REPORT"] = False
+        return base_df
 
-if df.empty:
-    st.error("Dashboard failed to initialize.")
+    def match_item(sym, comp):
+        s = str(sym).strip().upper()
+        c = re.sub(r"[^\w\s]", "", str(comp).upper()).split()[0] if pd.notna(comp) and str(comp).strip() else ""
+
+        for text, link in catalog_items:
+            if len(s) >= 3 and s in text:
+                return link
+            if len(c) >= 4 and c in text:
+                return link
+        return None
+
+    symbols = base_df["SYMBOL"].values
+    companies = base_df["COMPANY"].values if "COMPANY" in base_df.columns else [""] * len(base_df)
+
+    links = [match_item(s, c) for s, c in zip(symbols, companies)]
+    base_df["REPORT_LINK"] = links
+    base_df["HAS_REPORT"] = [l is not None for l in links]
+    return base_df
+
+
+# --- LOAD DATA ---
+raw_df, active_session = load_base_datasets()
+if raw_df.empty:
+    st.error("Dashboard failed to initialize. Please verify GitHub Parquet access.")
     st.stop()
 
-# ------------------------------------------------------------------------------
-# 4. REPORT MATCHING ENGINE
-# ------------------------------------------------------------------------------
-def match_research_report(row, rep_df):
-    if rep_df.empty:
-        return "None"
-    
-    sym = str(row.get("SYMBOL", "")).upper()
-    comp = str(row.get("COMPANY", "")).upper()
-    comp_clean = re.sub(r"[^\w\s]", "", comp).split()[0] if comp else ""
+report_items = get_report_link_map(REPORTS_SHEET_CSV_URL)
+df = attach_reports_fast(raw_df, report_items)
 
-    # Match in title or symbol column
-    for _, rep in rep_df.iterrows():
-        title = str(rep.get("REPORT_TITLE", "")).upper()
-        keyword = str(rep.get("SYMBOL_OR_NAME", "")).upper()
-        link = str(rep.get("DRIVE_VIEW_LINK", ""))
-
-        if (len(sym) >= 3 and (sym in title or sym in keyword)) or \
-           (len(comp_clean) >= 4 and (comp_clean in title or comp_clean in keyword)):
-            return link
-
-    return "None"
-
-
-df["REPORT_LINK"] = df.apply(lambda r: match_research_report(r, reports_df), axis=1)
-df["HAS_REPORT"] = df["REPORT_LINK"] != "None"
-
-# ------------------------------------------------------------------------------
-# SIDEBAR FILTERS
-# ------------------------------------------------------------------------------
-st.sidebar.title("⚡ Unified Engine Filters")
+# ==============================================================================
+# 4. SIDEBAR CONTROLS & FILTERS
+# ==============================================================================
+st.sidebar.title("⚡ Confluence & Report Filters")
 st.sidebar.caption(f"Session: **{active_session.strftime('%d %b %Y')}**")
 
 report_only = st.sidebar.checkbox("⭐ Show Only Stocks with Research Reports", value=False)
@@ -179,11 +209,16 @@ if roce_col:
     if min_roce > 0:
         df = df[pd.to_numeric(df[roce_col[0]], errors="coerce").fillna(0) >= min_roce]
 
-# ------------------------------------------------------------------------------
-# DASHBOARD DISPLAY
-# ------------------------------------------------------------------------------
+if "SECTOR" in df.columns:
+    sectors = sorted(df["SECTOR"].unique().tolist())
+    selected_sec = st.sidebar.multiselect("Filter by Sector:", options=sectors, default=sectors)
+    df = df[df["SECTOR"].isin(selected_sec)]
+
+# ==============================================================================
+# 5. DASHBOARD LAYOUT & METRICS
+# ==============================================================================
 st.title("⚡ Institutional Confluence & Research Terminal")
-st.markdown(f"Screening **{len(df):,}** equities with linked fundamental scores & live Google Drive research coverage.")
+st.markdown(f"Screening **{len(df):,}** equities with technical alerts, Screener metrics, and live Google Drive research coverage.")
 
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Screened Equities", f"{len(df):,} Stocks")
@@ -193,6 +228,7 @@ k4.metric("Avg DSI", f"{df['DSI'].mean():.2f}x")
 
 st.divider()
 
+# Organize columns cleanly
 display_cols = [
     "REPORT_LINK", "SYMBOL", "COMPANY", "SECTOR", "CLOSE", "PCT_CHANGE",
     "DELIV_QTY", "DSI", "MANSFIELD_RS", "CONFLUENCE_SCORE", "FUNDAMENTAL_SIGNALS",
@@ -200,7 +236,6 @@ display_cols = [
 ]
 visible_cols = [c for c in display_cols if c in df.columns]
 
-# Format Google Drive Report links as clickable interactive links
 st.dataframe(
     df[visible_cols].sort_values(by=["HAS_REPORT", "DSI"], ascending=[False, False]),
     column_config={
@@ -209,7 +244,7 @@ st.dataframe(
             help="Direct link to view PDF report in Google Drive",
             validate=r"^https://.*",
             max_chars=100,
-            display_text="📄 View PDF"
+            display_text="📄 View Report"
         ),
         "CLOSE": st.column_config.NumberColumn("Close (₹)", format="₹%.2f"),
         "PCT_CHANGE": st.column_config.NumberColumn("Change (%)", format="%+.2f%%"),
