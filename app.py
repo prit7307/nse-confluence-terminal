@@ -20,7 +20,7 @@ SECTOR_MASTER_URL = "https://raw.githubusercontent.com/prit7307/nse-working-scan
 FUNDAMENTAL_CSV_FILE = "nse_confluence_picks_20261030.csv"
 
 # Replace with your published Google Sheet CSV URL from Part 1
-REPORTS_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-YOUR_SHEET_ID/pub?output=csv"
+REPORTS_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRipXwixKWlGix_0O58Vq5kp-l5W8TubMbWaSeVf9P6j-JtT3GhpajftV4OK9kcl7cl6WJkfzGY1JRO/pub?output=csv"
 
 
 def clean_header(name: str) -> str:
