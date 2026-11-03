@@ -19,7 +19,7 @@ GITHUB_PARQUET_URL = "https://raw.githubusercontent.com/prit7307/nse-working-sca
 SECTOR_MASTER_URL = "https://raw.githubusercontent.com/prit7307/nse-working-scanner/main/nse_sector_master.csv"
 FUNDAMENTAL_CSV_FILE = "nse_confluence_picks_20261030.csv"
 
-# Your live published Google Sheet CSV URL
+# Live published Google Sheet CSV URL
 REPORTS_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRipXwixKWlGix_0O58Vq5kp-l5W8TubMbWaSeVf9P6j-JtT3GhpajftV4OK9kcl7cl6WJkfzGY1JRO/pub?output=csv"
 
 
@@ -236,8 +236,11 @@ display_cols = [
 ]
 visible_cols = [c for c in display_cols if c in df.columns]
 
+# Sort on the full dataframe first so HAS_REPORT is always accessible
+sorted_df = df.sort_values(by=["HAS_REPORT", "DSI"], ascending=[False, False])
+
 st.dataframe(
-    df[visible_cols].sort_values(by=["HAS_REPORT", "DSI"], ascending=[False, False]),
+    sorted_df[visible_cols],
     column_config={
         "REPORT_LINK": st.column_config.LinkColumn(
             "Research Report",
